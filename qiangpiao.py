@@ -30,11 +30,17 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.markdown("### Quick Login")
 
+    # if st.button("🌐 Open Login Page", use_container_width=True, type="primary", key="open_login"):
+    #     webbrowser.open(brs_login_url, new=2)  # new=2 opens in new tab
+    #     st.session_state.last_opened = "Login Page"
+    #     st.session_state.open_count += 1
+    #     st.success("✅ Login page opened in browser!")
+    #     st.balloons()
     if st.button("🌐 Open Login Page", use_container_width=True, type="primary", key="open_login"):
-        webbrowser.open(brs_login_url, new=2)  # new=2 opens in new tab
         st.session_state.last_opened = "Login Page"
         st.session_state.open_count += 1
-        st.success("✅ Login page opened in browser!")
+        st.markdown(f'<a href="{brs_login_url}" target="_blank">Click here to open login page</a>', unsafe_allow_html=True)
+        st.success("✅ Login link ready - click above to open in browser!")
         st.balloons()
 
     st.caption(f"🔗 URL: `{brs_login_url}`")
