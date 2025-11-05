@@ -23,7 +23,15 @@ st.markdown("---")
 # ============================================================================
 st.header("📝 Step 1: Login to BRS Golf")
 
-brs_login_url = "https://members.brsgolf.com/gsaayr/login"
+# Login URL input
+st.markdown("### Login URL")
+brs_login_url = st.text_input(
+    "Enter BRS Golf login URL",
+    value="https://members.brsgolf.com/gsaayr/login",
+    label_visibility="collapsed",
+    help="Enter the full URL of the BRS Golf login page",
+    key="login_url_input"
+)
 
 col1, col2 = st.columns([1, 2])
 
@@ -37,17 +45,23 @@ with col1:
     #     st.success("✅ Login page opened in browser!")
     #     st.balloons()
     if st.button("🌐 Open Login Page", use_container_width=True, type="primary", key="open_login"):
-        st.session_state.last_opened = "Login Page"
-        st.session_state.open_count += 1
-        st.markdown(f'<a href="{brs_login_url}" target="_blank">Click here to open login page</a>', unsafe_allow_html=True)
-        st.success("✅ Login link ready - click above to open in browser!")
-        st.balloons()
+        if brs_login_url:
+            st.session_state.last_opened = "Login Page"
+            st.session_state.open_count += 1
+            st.markdown(f'<a href="{brs_login_url}" target="_blank">Click here to open login page</a>', unsafe_allow_html=True)
+            st.success("✅ Login link ready - click above to open in browser!")
+            st.balloons()
+        else:
+            st.error("Please enter a login URL first")
 
     st.caption(f"🔗 URL: `{brs_login_url}`")
 
     if st.button("📋 Copy Login URL", use_container_width=True):
-        st.code(brs_login_url, language=None)
-        st.info("👆 URL displayed above - copy it manually")
+        if brs_login_url:
+            st.code(brs_login_url, language=None)
+            st.info("👆 URL displayed above - copy it manually")
+        else:
+            st.error("No URL to copy")
 
 with col2:
     st.info("""
