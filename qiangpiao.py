@@ -114,33 +114,60 @@ st.markdown("### Actions")
 
 col1, col2, col3, col4 = st.columns(4)
 
+# with col1:
+#     if st.button("🌐 Open Tee Sheet", use_container_width=True, type="primary"):
+#         if user_url:
+#             webbrowser.open(user_url, new=2)
+#             st.session_state.last_opened = "Tee Sheet"
+#             st.session_state.open_count += 1
+#             st.success("✅ Tee sheet opened!")
+#         else:
+#             st.error("Please enter a URL first")
 with col1:
     if st.button("🌐 Open Tee Sheet", use_container_width=True, type="primary"):
         if user_url:
-            webbrowser.open(user_url, new=2)
             st.session_state.last_opened = "Tee Sheet"
             st.session_state.open_count += 1
-            st.success("✅ Tee sheet opened!")
+            st.markdown(f'<a href="{user_url}" target="_blank">Click here to open tee sheet in new tab</a>', unsafe_allow_html=True)
+            st.success("✅ Tee sheet link ready - click above to open!")
         else:
             st.error("Please enter a URL first")
 
+# with col2:
+#     if st.button("🔄 Refresh (New Tab)", use_container_width=True):
+#         if user_url:
+#             webbrowser.open(user_url, new=2)
+#             st.session_state.last_opened = f"Refresh #{st.session_state.open_count}"
+#             st.session_state.open_count += 1
+#             st.success("🔄 Opened fresh tab!")
+#         else:
+#             st.error("Please enter a URL first")
 with col2:
     if st.button("🔄 Refresh (New Tab)", use_container_width=True):
         if user_url:
-            webbrowser.open(user_url, new=2)
             st.session_state.last_opened = f"Refresh #{st.session_state.open_count}"
             st.session_state.open_count += 1
-            st.success("🔄 Opened fresh tab!")
+            st.markdown(f'<a href="{user_url}" target="_blank">Click here to refresh tee sheet (opens new tab)</a>', unsafe_allow_html=True)
+            st.success("🔄 Refresh link ready - click above to open!")
         else:
             st.error("Please enter a URL first")
 
+# with col3:
+#     if st.button("🪟 Open in New Window", use_container_width=True):
+#         if user_url:
+#             webbrowser.open(user_url, new=1)  # new=1 opens in new window
+#             st.session_state.last_opened = "New Window"
+#             st.session_state.open_count += 1
+#             st.success("🪟 Opened in new window!")
+#         else:
+#             st.error("Please enter a URL first")
 with col3:
     if st.button("🪟 Open in New Window", use_container_width=True):
         if user_url:
-            webbrowser.open(user_url, new=1)  # new=1 opens in new window
             st.session_state.last_opened = "New Window"
             st.session_state.open_count += 1
-            st.success("🪟 Opened in new window!")
+            st.markdown(f'<a href="{user_url}" target="_blank">Click here to open in new window/tab</a>', unsafe_allow_html=True)
+            st.success("🪟 Link ready - click above to open in new window/tab!")
         else:
             st.error("Please enter a URL first")
 
