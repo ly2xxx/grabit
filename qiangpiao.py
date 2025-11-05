@@ -1,6 +1,16 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import webbrowser
 import time
+import os
+import platform
+
+# Environment detection
+def is_streamlit_cloud():
+    """Detect if running on Streamlit Cloud vs local development"""
+    # Streamlit Cloud runs on Linux with empty processor string
+    # Also check for 'appuser' which is the default Streamlit Cloud user
+    return platform.processor() == '' or os.getenv('USER') == 'appuser'
 
 st.set_page_config(page_title="BRS Golf Quick Access", layout="wide", page_icon="⛳")
 st.title("⛳ BRS Golf Quick Access")
@@ -93,7 +103,7 @@ col1, col2 = st.columns([3, 1])
 with col1:
     user_url = st.text_input(
         "Enter tee sheet URL",
-        value="https://members.brsgolf.com/gsaayr/tee-sheet/1/2025/11/04",
+        value="https://members.brsgolf.com/gsaayr/tee-sheet/1/2025/11/11",
         label_visibility="collapsed",
         help="Enter the full URL of the tee sheet page you want to access"
     )
@@ -213,10 +223,43 @@ if auto_refresh_enabled:
     # Check if it's time to refresh
     if current_time >= st.session_state.next_refresh_time:
         if user_url:
-            webbrowser.open(user_url, new=2)
+            # Detect environment and use appropriate method
+            if is_streamlit_cloud():
+                # Streamlit Cloud: Use JavaScript programmatic anchor click
+                # This has better popup blocker bypass than window.open()
+                auto_click_html = f"""
+                <script>
+                (function() {{
+                    const link = document.createElement('a');
+                    link.href = '{user_url}';
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }})();
+                </script>
+                """
+
+                # Render the auto-click component
+                components.html(auto_click_html, height=0)
+
+                # Show fallback link only on cloud (where popup blocking is likely)
+                st.warning("🚨 **If no tab opened (popup blocked), click here:**")
+                st.markdown(
+                    f'<a href="{user_url}" target="_blank" style="display:inline-block;padding:12px 24px;background-color:#ff4b4b;color:white;text-decoration:none;border-radius:5px;font-weight:bold;font-size:18px;">📱 CLICK TO OPEN TEE SHEET</a>',
+                    unsafe_allow_html=True
+                )
+            else:
+                # Local development: Use native webbrowser.open (works perfectly)
+                webbrowser.open(user_url, new=2)
+
+            # Update session state (same for both environments)
             st.session_state.last_opened = f"Auto-refresh #{st.session_state.open_count}"
             st.session_state.open_count += 1
             st.session_state.next_refresh_time = time.time() + refresh_interval
+
+            # Show success message
             st.toast("🔄 Auto-refreshed! New tab opened.", icon="✅")
 
     # Show countdown
