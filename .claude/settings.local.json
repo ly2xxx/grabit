@@ -7,7 +7,9 @@
       "WebSearch",
       "WebFetch(domain:discuss.streamlit.io)",
       "WebFetch(domain:gist.github.com)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "WebFetch(domain:playwright.dev)",
+      "WebFetch(domain:medium.com)"
     ],
     "deny": [],
     "ask": []
