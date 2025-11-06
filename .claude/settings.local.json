@@ -6,7 +6,8 @@
       "WebFetch(domain:www.mikepalmer.dev)",
       "WebSearch",
       "WebFetch(domain:discuss.streamlit.io)",
-      "WebFetch(domain:gist.github.com)"
+      "WebFetch(domain:gist.github.com)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []
