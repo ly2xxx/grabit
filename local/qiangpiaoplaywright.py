@@ -35,12 +35,41 @@ def check_playwright_available():
 
 def run_async(coro):
     """Run async function in sync context for Streamlit"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    # Use persistent event loop if browser session is active
+    if st.session_state.get('browser_active') and st.session_state.get('event_loop'):
+        loop = st.session_state.event_loop
+
+        # Validate loop is usable
+        if loop.is_closed():
+            print("[ERROR] Event loop is closed! Creating new temporary loop.")
+            # Fall back to temporary loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        if loop.is_running():
+            print("[ERROR] Event loop is already running! This shouldn't happen in Streamlit.")
+            raise RuntimeError("Cannot run async function: event loop is already running")
+
+        print(f"[DEBUG] Reusing persistent event loop (closed={loop.is_closed()}, running={loop.is_running()})")
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        except Exception as e:
+            print(f"[ERROR] Failed to run async function on persistent loop: {e}")
+            raise
+    else:
+        # Create temporary event loop for one-off operations
+        print("[DEBUG] Creating temporary event loop for one-off operation")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
 async def _navigate_to_page_async(url):
     """Navigate to a URL using Playwright (async)"""
@@ -63,68 +92,86 @@ def navigate_to_page(url):
         return False, f"Navigation failed: {str(e)}"
 
 async def _scan_clickable_elements_async(url, storage_state=None):
-    """Scan page for all clickable elements (async)"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    """Scan page for all clickable elements (async) - reuses persistent browser if available"""
+    # Check if we have a persistent browser session
+    use_persistent = st.session_state.browser_active and st.session_state.browser_page is not None
 
-        # Create context with storage state if provided
+    if use_persistent:
+        # Reuse existing browser page
+        page = st.session_state.browser_page
+        temp_playwright = None
+        temp_browser = None
+        temp_context = None
+        print(f"[DEBUG] Using persistent browser session for scanning: {url}")
+    else:
+        # Create temporary browser for this operation
+        print(f"[DEBUG] Creating temporary browser for scanning: {url}")
+        temp_playwright = await async_playwright().start()
+        temp_browser = await temp_playwright.chromium.launch(headless=True)
+
         if storage_state:
-            context = await browser.new_context(storage_state=storage_state)
+            temp_context = await temp_browser.new_context(storage_state=storage_state)
         else:
-            context = await browser.new_context()
+            temp_context = await temp_browser.new_context()
 
-        page = await context.new_page()
-        try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+        page = await temp_context.new_page()
 
-            # Find all clickable elements
-            elements = await page.query_selector_all('button, a, input[type="submit"], input[type="button"], [role="button"]')
+    try:
+        await page.goto(url, wait_until="networkidle", timeout=30000)
 
-            result = []
-            for i, elem in enumerate(elements):
-                # Check if element is visible
-                is_visible = await elem.is_visible()
-                if not is_visible:
-                    continue
+        # Find all clickable elements
+        elements = await page.query_selector_all('button, a, input[type="submit"], input[type="button"], [role="button"]')
 
-                # Get element properties
-                text_content = await elem.text_content()
-                value = await elem.get_attribute('value')
-                elem_id = await elem.get_attribute('id')
-                elem_class = await elem.get_attribute('class')
-                tag_name = await elem.evaluate('el => el.tagName')
-                is_disabled = await elem.is_disabled()
+        result = []
+        for i, elem in enumerate(elements):
+            # Check if element is visible
+            is_visible = await elem.is_visible()
+            if not is_visible:
+                continue
 
-                # Get text
-                text = (text_content or value or '').strip()[:80] or f"Element {i+1}"
+            # Get element properties
+            text_content = await elem.text_content()
+            value = await elem.get_attribute('value')
+            elem_id = await elem.get_attribute('id')
+            elem_class = await elem.get_attribute('class')
+            tag_name = await elem.evaluate('el => el.tagName')
+            is_disabled = await elem.is_disabled()
 
-                # Generate selector (prefer ID, then class, then nth-of-type)
-                if elem_id:
-                    selector = f"#{elem_id}"
-                elif elem_class and elem_class.strip():
-                    first_class = elem_class.strip().split()[0]
-                    selector = f".{first_class}"
-                else:
-                    selector = f"{tag_name.lower()}:nth-of-type({i+1})"
+            # Get text
+            text = (text_content or value or '').strip()[:80] or f"Element {i+1}"
 
-                result.append({
-                    'index': i,
-                    'text': text,
-                    'selector': selector,
-                    'enabled': not is_disabled,
-                    'visible': True,
-                    'type': tag_name,
-                    'id': elem_id or '',
-                    'class': elem_class or ''
-                })
+            # Generate selector (prefer ID, then class, then nth-of-type)
+            if elem_id:
+                selector = f"#{elem_id}"
+            elif elem_class and elem_class.strip():
+                first_class = elem_class.strip().split()[0]
+                selector = f".{first_class}"
+            else:
+                selector = f"{tag_name.lower()}:nth-of-type({i+1})"
 
-            return True, result
+            result.append({
+                'index': i,
+                'text': text,
+                'selector': selector,
+                'enabled': not is_disabled,
+                'visible': True,
+                'type': tag_name,
+                'id': elem_id or '',
+                'class': elem_class or ''
+            })
 
-        except Exception as e:
-            return False, f"Scan failed: {str(e)}"
-        finally:
-            await context.close()
-            await browser.close()
+        return True, result
+
+    except Exception as e:
+        return False, f"Scan failed: {str(e)}"
+    finally:
+        # Only close if we created a temporary browser
+        if temp_context:
+            await temp_context.close()
+        if temp_browser:
+            await temp_browser.close()
+        if temp_playwright:
+            await temp_playwright.stop()
 
 def scan_clickable_elements(url, storage_state=None):
     """Scan page for all clickable elements"""
@@ -134,53 +181,71 @@ def scan_clickable_elements(url, storage_state=None):
         return False, f"Scan failed: {str(e)}"
 
 async def _click_element_when_ready_async(url, selector, wait_enabled=True, timeout=30, storage_state=None):
-    """Click an element on a page, optionally waiting for it to be enabled (async)"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    """Click an element on a page, optionally waiting for it to be enabled (async) - reuses persistent browser if available"""
+    # Check if we have a persistent browser session
+    use_persistent = st.session_state.browser_active and st.session_state.browser_page is not None
 
-        # Create context with storage state if provided
+    if use_persistent:
+        # Reuse existing browser page
+        page = st.session_state.browser_page
+        temp_playwright = None
+        temp_browser = None
+        temp_context = None
+        print(f"[DEBUG] Using persistent browser session for clicking: {url}")
+    else:
+        # Create temporary browser for this operation
+        print(f"[DEBUG] Creating temporary browser for clicking: {url}")
+        temp_playwright = await async_playwright().start()
+        temp_browser = await temp_playwright.chromium.launch(headless=True)
+
         if storage_state:
-            context = await browser.new_context(storage_state=storage_state)
+            temp_context = await temp_browser.new_context(storage_state=storage_state)
         else:
-            context = await browser.new_context()
+            temp_context = await temp_browser.new_context()
 
-        page = await context.new_page()
-        try:
-            # Navigate to the URL
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+        page = await temp_context.new_page()
 
-            if wait_enabled:
-                # Wait for element to be enabled (poll)
-                start_time = time.time()
-                while time.time() - start_time < timeout:
-                    try:
-                        elem = await page.query_selector(selector)
-                        if elem:
-                            is_visible = await elem.is_visible()
-                            is_disabled = await elem.is_disabled()
-                            if is_visible and not is_disabled:
-                                # Element is ready, click it
-                                await elem.click()
-                                return True, "Element clicked successfully"
-                        await asyncio.sleep(0.5)
-                    except:
-                        await asyncio.sleep(0.5)
+    try:
+        # Navigate to the URL
+        await page.goto(url, wait_until="networkidle", timeout=30000)
 
-                return False, f"Element not ready after {timeout} seconds"
+        if wait_enabled:
+            # Wait for element to be enabled (poll)
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                try:
+                    elem = await page.query_selector(selector)
+                    if elem:
+                        is_visible = await elem.is_visible()
+                        is_disabled = await elem.is_disabled()
+                        if is_visible and not is_disabled:
+                            # Element is ready, click it
+                            await elem.click()
+                            return True, "Element clicked successfully"
+                    await asyncio.sleep(0.5)
+                except:
+                    await asyncio.sleep(0.5)
+
+            return False, f"Element not ready after {timeout} seconds"
+        else:
+            # Click immediately
+            elem = await page.query_selector(selector)
+            if elem:
+                await elem.click()
+                return True, "Element clicked successfully"
             else:
-                # Click immediately
-                elem = await page.query_selector(selector)
-                if elem:
-                    await elem.click()
-                    return True, "Element clicked successfully"
-                else:
-                    return False, "Element not found"
+                return False, "Element not found"
 
-        except Exception as e:
-            return False, f"Click failed: {str(e)}"
-        finally:
-            await context.close()
-            await browser.close()
+    except Exception as e:
+        return False, f"Click failed: {str(e)}"
+    finally:
+        # Only close if we created a temporary browser
+        if temp_context:
+            await temp_context.close()
+        if temp_browser:
+            await temp_browser.close()
+        if temp_playwright:
+            await temp_playwright.stop()
 
 def click_element_when_ready(url, selector, wait_enabled=True, timeout=30, storage_state=None):
     """Click an element on a page, optionally waiting for it to be enabled"""
@@ -190,28 +255,46 @@ def click_element_when_ready(url, selector, wait_enabled=True, timeout=30, stora
         return False, f"Click failed: {str(e)}"
 
 async def _capture_screenshot_async(url=None, storage_state=None):
-    """Capture a screenshot of a page (async)"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    """Capture a screenshot of a page (async) - reuses persistent browser if available"""
+    # Check if we have a persistent browser session
+    use_persistent = st.session_state.browser_active and st.session_state.browser_page is not None
 
-        # Create context with storage state if provided
+    if use_persistent:
+        # Reuse existing browser page
+        page = st.session_state.browser_page
+        temp_playwright = None
+        temp_browser = None
+        temp_context = None
+        print(f"[DEBUG] Using persistent browser session for screenshot: {url}")
+    else:
+        # Create temporary browser for this operation
+        print(f"[DEBUG] Creating temporary browser for screenshot: {url}")
+        temp_playwright = await async_playwright().start()
+        temp_browser = await temp_playwright.chromium.launch(headless=True)
+
         if storage_state:
-            context = await browser.new_context(storage_state=storage_state)
+            temp_context = await temp_browser.new_context(storage_state=storage_state)
         else:
-            context = await browser.new_context()
+            temp_context = await temp_browser.new_context()
 
-        page = await context.new_page()
-        try:
-            if url:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
+        page = await temp_context.new_page()
 
-            screenshot_bytes = await page.screenshot(full_page=True)
-            return True, screenshot_bytes
-        except Exception as e:
-            return False, f"Screenshot failed: {str(e)}"
-        finally:
-            await context.close()
-            await browser.close()
+    try:
+        if url:
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+
+        screenshot_bytes = await page.screenshot(full_page=True)
+        return True, screenshot_bytes
+    except Exception as e:
+        return False, f"Screenshot failed: {str(e)}"
+    finally:
+        # Only close if we created a temporary browser
+        if temp_context:
+            await temp_context.close()
+        if temp_browser:
+            await temp_browser.close()
+        if temp_playwright:
+            await temp_playwright.stop()
 
 def capture_screenshot(url=None, storage_state=None):
     """Capture a screenshot of a page"""
@@ -220,54 +303,127 @@ def capture_screenshot(url=None, storage_state=None):
     except Exception as e:
         return False, f"Screenshot failed: {str(e)}"
 
+async def _cleanup_browser_async():
+    """Cleanup browser instances (async)"""
+    try:
+        if st.session_state.browser_page:
+            await st.session_state.browser_page.close()
+        if st.session_state.browser_context:
+            await st.session_state.browser_context.close()
+        if st.session_state.browser:
+            await st.session_state.browser.close()
+        if st.session_state.playwright_instance:
+            await st.session_state.playwright_instance.stop()
+    except Exception as e:
+        pass  # Silently fail cleanup
+    finally:
+        # Reset state
+        st.session_state.browser_page = None
+        st.session_state.browser_context = None
+        st.session_state.browser = None
+        st.session_state.playwright_instance = None
+        st.session_state.browser_active = False
+
+        # Close event loop (if it exists and not the current one being used)
+        if st.session_state.event_loop and not st.session_state.event_loop.is_running():
+            try:
+                st.session_state.event_loop.close()
+            except Exception:
+                pass
+        st.session_state.event_loop = None
+
+def cleanup_browser():
+    """Cleanup browser instances"""
+    try:
+        run_async(_cleanup_browser_async())
+    except Exception as e:
+        # Force reset even if cleanup fails
+        st.session_state.browser_page = None
+        st.session_state.browser_context = None
+        st.session_state.browser = None
+        st.session_state.playwright_instance = None
+        st.session_state.browser_active = False
+
+        # Close event loop
+        if st.session_state.event_loop and not st.session_state.event_loop.is_running():
+            try:
+                st.session_state.event_loop.close()
+            except Exception:
+                pass
+        st.session_state.event_loop = None
+
 async def _capture_login_session_async(login_url, timeout=180):
-    """Open browser for manual login and capture session (async)"""
-    async with async_playwright() as p:
+    """Open browser for manual login and keep it open (async) - NO COOKIE STORAGE!"""
+    try:
+        # Clean up any existing browser first
+        await _cleanup_browser_async()
+
         # Use visible browser on local, headless on cloud
         headless = is_streamlit_cloud()
-        browser = await p.chromium.launch(headless=headless)
+
+        if headless:
+            # Cloud: headless mode - manual login not supported
+            return False, "Manual login not supported in headless mode (Streamlit Cloud). Please use local development or configure automated login."
+
+        # Create new playwright instance (DO NOT use context manager - we want to keep it alive!)
+        p = await async_playwright().start()
+        browser = await p.chromium.launch(headless=False)  # Always visible for login
         context = await browser.new_context()
-        page = await browser.new_page()
+        page = await context.new_page()
 
-        try:
-            await page.goto(login_url, wait_until="networkidle", timeout=30000)
+        await page.goto(login_url, wait_until="networkidle", timeout=30000)
 
-            if not headless:
-                # Local: visible browser - wait for user to manually login
-                # Wait for timeout period (user should login and close tab manually or we timeout)
-                initial_url = page.url
-                start_time = time.time()
+        # Local: visible browser - wait for user to manually login
+        initial_url = page.url
+        start_time = time.time()
 
-                # Poll for URL change (indicates navigation after login)
-                while time.time() - start_time < timeout:
-                    await asyncio.sleep(2)
-                    current_url = page.url
-                    # If URL changed from login page, assume login successful
-                    if current_url != initial_url and 'login' not in current_url.lower():
-                        break
+        # Poll for URL change (indicates navigation after login)
+        while time.time() - start_time < timeout:
+            await asyncio.sleep(2)
+            try:
+                current_url = page.url
+                # If URL changed from login page, assume login successful
+                if current_url != initial_url and 'login' not in current_url.lower():
+                    break
+            except Exception:
+                # Page might be closed by user
+                return False, "Browser was closed before login completed"
 
-            else:
-                # Cloud: headless mode - wait fixed time
-                # User won't see browser, so we can't do manual login in cloud
-                # This is a fallback - cloud should use alternative method
-                return False, "Manual login not supported in headless mode (Streamlit Cloud). Please use local development or configure automated login."
+        # Store instances in session state (DO NOT CLOSE!)
+        st.session_state.playwright_instance = p
+        st.session_state.browser = browser
+        st.session_state.browser_context = context
+        st.session_state.browser_page = page
+        st.session_state.browser_active = True
 
-            # Capture storage state (cookies, localStorage, sessionStorage)
-            storage_state = await context.storage_state()
+        return True, "Browser session active - no cookies stored!"
 
-            return True, storage_state
-
-        except Exception as e:
-            return False, f"Login capture failed: {str(e)}"
-        finally:
-            await context.close()
-            await browser.close()
+    except Exception as e:
+        # Clean up on error
+        await _cleanup_browser_async()
+        return False, f"Login capture failed: {str(e)}"
 
 def capture_login_session(login_url, timeout=180):
     """Open browser for manual login and capture session"""
     try:
-        return run_async(_capture_login_session_async(login_url, timeout))
+        # Create a new persistent event loop for the browser session
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        st.session_state.event_loop = loop
+
+        # Run the async function in the persistent loop
+        result = loop.run_until_complete(_capture_login_session_async(login_url, timeout))
+
+        # Don't close the loop - keep it alive for the browser session!
+        return result
     except Exception as e:
+        # Clean up on error
+        if st.session_state.event_loop:
+            try:
+                st.session_state.event_loop.close()
+            except:
+                pass
+            st.session_state.event_loop = None
         return False, f"Login capture failed: {str(e)}"
 
 st.set_page_config(page_title="Web Page Launcher", layout="wide", page_icon="🔗")
@@ -289,11 +445,19 @@ if 'automation_status' not in st.session_state:
     st.session_state.automation_status = "Not started"
 if 'last_screenshot' not in st.session_state:
     st.session_state.last_screenshot = None
-# Authentication session state
-if 'auth_storage_state' not in st.session_state:
-    st.session_state.auth_storage_state = None
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
+# Browser instance state (for persistent session - no cookie storage!)
+if 'playwright_instance' not in st.session_state:
+    st.session_state.playwright_instance = None
+if 'browser' not in st.session_state:
+    st.session_state.browser = None
+if 'browser_context' not in st.session_state:
+    st.session_state.browser_context = None
+if 'browser_page' not in st.session_state:
+    st.session_state.browser_page = None
+if 'browser_active' not in st.session_state:
+    st.session_state.browser_active = False
+if 'event_loop' not in st.session_state:
+    st.session_state.event_loop = None
 
 st.markdown("""
 This app provides automated web page access with element detection and clicking.
@@ -363,21 +527,20 @@ with col2:
     """)
 
 # Login Session Capture for Automation
-st.markdown("### 🔑 Capture Login Session (For Automation)")
+st.markdown("### 🔑 Open Browser Session (For Automation)")
 
-if st.session_state.logged_in:
-    st.success(f"✅ Login session active! Automation will use your saved session.")
+if st.session_state.browser_active:
+    st.success(f"✅ Browser session active! Automation will use your open browser (no cookies stored).")
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🗑️ Clear Saved Session", use_container_width=True):
-            st.session_state.auth_storage_state = None
-            st.session_state.logged_in = False
-            st.success("Session cleared! Please login again for automation.")
+        if st.button("🛑 Close Browser", use_container_width=True, type="secondary"):
+            cleanup_browser()
+            st.success("Browser closed! Open a new session for automation.")
             st.rerun()
     with col2:
-        st.caption("💡 Session persists until page reload or manual clear")
+        st.info("🔒 Secure: Browser stays open, no data stored in app")
 else:
-    st.warning("⚠️ No active session. Automation may redirect to login page.")
+    st.warning("⚠️ No active browser session. Automation may redirect to login page.")
 
     if not st.session_state.playwright_available:
         st.error("❌ Playwright not available. Cannot capture login session.")
@@ -393,14 +556,12 @@ else:
         3. The app will attempt automation but may hit login redirects
         """)
     else:
-        if st.button("🔐 Capture Login Session", use_container_width=True, type="primary"):
+        if st.button("🔐 Open Browser & Login", use_container_width=True, type="primary"):
             if login_url:
                 with st.spinner("Opening browser for login... Please login and the browser will auto-detect when done (or wait 3 minutes)."):
                     success, result = capture_login_session(login_url, timeout=180)
                     if success:
-                        st.session_state.auth_storage_state = result
-                        st.session_state.logged_in = True
-                        st.success("✅ Login session captured successfully!")
+                        st.success("✅ Browser session opened successfully! Browser will stay open for automation.")
                         st.balloons()
                         st.rerun()
                     else:
@@ -409,12 +570,13 @@ else:
                 st.error("Please enter a login URL first")
 
         st.caption("""
-        💡 **How it works:**
+        💡 **How it works (Secure - No Cookie Storage!):**
         1. Click the button above
         2. A Chrome browser window will open
         3. Log in to the website normally
-        4. Once logged in (URL changes from login page), the session is automatically captured
-        5. Your session will be used for all automation operations
+        4. Once logged in (URL changes from login page), the browser stays open
+        5. All automation operations use this open browser
+        6. **Security:** Browser session stays in memory, no cookies saved to disk!
         """)
 
 st.markdown("---")
@@ -445,7 +607,7 @@ with col1:
     if st.button("🔍 Scan Page for Elements", use_container_width=True, type="primary", disabled=not st.session_state.playwright_available):
         if user_url:
             with st.spinner("🔄 Scanning page for clickable elements..."):
-                success, result = scan_clickable_elements(user_url, storage_state=st.session_state.auth_storage_state)
+                success, result = scan_clickable_elements(user_url)
                 if success:
                     st.session_state.detected_elements = result
                     st.session_state.automation_status = f"Found {len(result)} elements"
@@ -461,7 +623,7 @@ with col2:
     if st.button("📸 Capture Screenshot", use_container_width=True, disabled=not st.session_state.playwright_available):
         if user_url:
             with st.spinner("📸 Capturing screenshot..."):
-                success, result = capture_screenshot(user_url, storage_state=st.session_state.auth_storage_state)
+                success, result = capture_screenshot(user_url)
                 if success:
                     st.session_state.last_screenshot = result
                     st.success("✅ Screenshot captured!")
@@ -525,13 +687,12 @@ if st.session_state.detected_elements:
                         user_url,
                         elem['selector'],
                         wait_enabled=False,
-                        timeout=5,
-                        storage_state=st.session_state.auth_storage_state
+                        timeout=5
                     )
                     if success:
                         st.success(f"✅ {message}")
                         # Capture screenshot after click
-                        success_ss, screenshot = capture_screenshot(user_url, storage_state=st.session_state.auth_storage_state)
+                        success_ss, screenshot = capture_screenshot(user_url)
                         if success_ss:
                             st.session_state.last_screenshot = screenshot
                             st.image(screenshot, caption="After Click", use_container_width=True)
@@ -608,8 +769,7 @@ if auto_refresh_enabled:
                         user_url,
                         st.session_state.selected_element['selector'],
                         wait_enabled=True,
-                        timeout=wait_timeout,
-                        storage_state=st.session_state.auth_storage_state
+                        timeout=wait_timeout
                     )
 
                     if click_success:
@@ -618,7 +778,7 @@ if auto_refresh_enabled:
                         st.session_state.last_opened = f"Auto-click #{st.session_state.open_count}"
 
                         # Capture screenshot after successful click
-                        ss_success, screenshot = capture_screenshot(user_url, storage_state=st.session_state.auth_storage_state)
+                        ss_success, screenshot = capture_screenshot(user_url)
                         if ss_success:
                             st.session_state.last_screenshot = screenshot
 
@@ -703,8 +863,8 @@ with col3:
     st.metric("Mode", automation_status)
 
 with col4:
-    login_status = "✅ Logged In" if st.session_state.logged_in else "🔓 Not Logged In"
-    st.metric("Auth Status", login_status)
+    browser_status = "✅ Active" if st.session_state.browser_active else "🔓 Closed"
+    st.metric("Browser Status", browser_status)
 
 with col5:
     playwright_status = "✅ Available" if st.session_state.playwright_available else "⚠️ Unavailable"
@@ -718,13 +878,17 @@ st.info("""
 ### 📖 How to Use This App
 
 **Automated Workflow (Recommended):**
-1. **Step 1:** Click **"🌐 Open Login Page"** → Log in to the website in your browser
+1. **Step 1:** Click **"🔐 Open Browser & Login"** → Log in to the website in the Playwright browser window
 2. **Step 2:** Enter the target page URL
 3. Click **"🔍 Scan Page for Elements"** → App detects all clickable buttons/links
 4. Select which element to auto-click from the dropdown
 5. Click **"🧪 Test Click Now"** to verify you selected the right element
 6. Enable **"Auto-refresh automation"** to start monitoring
 7. The app will automatically navigate to the page, wait for the element to be enabled, and click it!
+
+**🔒 Security Note:**
+- Browser session stays open in memory - **no cookies or credentials are stored to disk!**
+- Click **"🛑 Close Browser"** when done to securely close the browser session
 
 **Auto-Refresh Automation:**
 - **Interval**: How often to check the page (10-3600 seconds)
@@ -739,11 +903,12 @@ st.info("""
 - **Enable auto-refresh automation** - Starts automated monitoring and clicking
 
 **How It Works:**
-- ✅ **Browser Automation** - Uses Playwright to control a headless Chromium browser
+- ✅ **Browser Automation** - Uses Playwright to control a Chromium browser
+- ✅ **Persistent Browser** - Keeps browser open for reuse (faster & more secure!)
 - ✅ **Smart Waiting** - Monitors element state and clicks when it becomes enabled
 - ✅ **Visual Feedback** - Shows screenshots after each automated action
 - ✅ **Fallback Mode** - If Playwright unavailable, falls back to simple URL opening
-- ✅ **Session Persistence** - Browser maintains login state between checks
+- 🔒 **Secure** - No cookies or credentials stored to disk, browser stays in memory
 
 **Use Cases:**
 - 🎟️ Auto-click "Book Now" when reservations open
