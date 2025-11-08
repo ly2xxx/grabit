@@ -254,6 +254,53 @@ def click_element_when_ready(url, selector, wait_enabled=True, timeout=30, stora
     except Exception as e:
         return False, f"Click failed: {str(e)}"
 
+async def _navigate_with_persistent_browser_async(url, storage_state=None):
+    """Navigate to URL using persistent browser if available (async) - no clicking"""
+    # Check if we have a persistent browser session
+    use_persistent = st.session_state.browser_active and st.session_state.browser_page is not None
+
+    if use_persistent:
+        # Reuse existing browser page
+        page = st.session_state.browser_page
+        temp_playwright = None
+        temp_browser = None
+        temp_context = None
+        print(f"[DEBUG] Using persistent browser session for navigation: {url}")
+    else:
+        # Create temporary browser for this operation
+        print(f"[DEBUG] Creating temporary browser for navigation: {url}")
+        temp_playwright = await async_playwright().start()
+        temp_browser = await temp_playwright.chromium.launch(headless=True)
+
+        if storage_state:
+            temp_context = await temp_browser.new_context(storage_state=storage_state)
+        else:
+            temp_context = await temp_browser.new_context()
+
+        page = await temp_context.new_page()
+
+    try:
+        # Navigate to the URL
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        return True, "Navigation successful"
+    except Exception as e:
+        return False, f"Navigation failed: {str(e)}"
+    finally:
+        # Only close if we created a temporary browser
+        if temp_context:
+            await temp_context.close()
+        if temp_browser:
+            await temp_browser.close()
+        if temp_playwright:
+            await temp_playwright.stop()
+
+def navigate_with_persistent_browser(url, storage_state=None):
+    """Navigate to URL using persistent browser if available"""
+    try:
+        return run_async(_navigate_with_persistent_browser_async(url, storage_state))
+    except Exception as e:
+        return False, f"Navigation failed: {str(e)}"
+
 async def _capture_screenshot_async(url=None, storage_state=None):
     """Capture a screenshot of a page (async) - reuses persistent browser if available"""
     # Check if we have a persistent browser session
@@ -439,6 +486,8 @@ if 'detected_elements' not in st.session_state:
     st.session_state.detected_elements = []
 if 'selected_element' not in st.session_state:
     st.session_state.selected_element = None
+if 'selected_element_selector' not in st.session_state:
+    st.session_state.selected_element_selector = None
 if 'playwright_available' not in st.session_state:
     st.session_state.playwright_available = check_playwright_available()
 if 'automation_status' not in st.session_state:
@@ -649,17 +698,23 @@ if st.session_state.detected_elements:
         label = f"{status_icon} [{elem['type']}] {elem['text'][:60]}"
         element_options[label] = elem
 
+    # Find index by comparing selectors (stable across reruns)
+    selected_index = 0
+    if st.session_state.selected_element_selector:
+        for i, label in enumerate(list(element_options.keys()), start=1):
+            if element_options[label]['selector'] == st.session_state.selected_element_selector:
+                selected_index = i
+                break
+
     selected_label = st.selectbox(
         "Choose which element to automatically click during auto-refresh",
         options=["None"] + list(element_options.keys()),
-        index=0 if st.session_state.selected_element is None else
-              (list(element_options.keys()).index(
-                  f"{'✅' if st.session_state.selected_element['enabled'] else '⏸️'} [{st.session_state.selected_element['type']}] {st.session_state.selected_element['text'][:60]}"
-              ) + 1 if st.session_state.selected_element in st.session_state.detected_elements else 0)
+        index=selected_index
     )
 
     if selected_label != "None":
         st.session_state.selected_element = element_options[selected_label]
+        st.session_state.selected_element_selector = element_options[selected_label]['selector']
 
         # Show selected element details
         elem = st.session_state.selected_element
@@ -702,6 +757,7 @@ if st.session_state.detected_elements:
             st.info("💡 Use this to verify you selected the correct element before enabling auto-refresh")
     else:
         st.session_state.selected_element = None
+        st.session_state.selected_element_selector = None
         st.info("👆 Select an element from the dropdown to enable automation")
 
 # Fallback: Simple URL opening for non-MCP environments
@@ -761,40 +817,74 @@ if auto_refresh_enabled:
     # Check if it's time to refresh
     if current_time >= st.session_state.next_refresh_time:
         if user_url:
-            # AUTOMATION MODE: Use browser automation if element is selected and Playwright is available
-            if st.session_state.selected_element and st.session_state.playwright_available:
-                with st.spinner(f"🤖 Automating click on: {st.session_state.selected_element['text'][:40]}..."):
-                    # Navigate to page and click element (with wait if enabled)
-                    click_success, click_message = click_element_when_ready(
-                        user_url,
-                        st.session_state.selected_element['selector'],
-                        wait_enabled=True,
-                        timeout=wait_timeout
-                    )
+            # AUTOMATION MODE: Use browser automation if Playwright is available
+            if st.session_state.playwright_available:
+                print(f"[DEBUG] Auto-refresh: Using AUTOMATION mode - will use persistent browser if available")
+                print(f"[DEBUG] Auto-refresh: browser_active={st.session_state.browser_active}, selected_element={st.session_state.selected_element['text'][:40] if st.session_state.selected_element else None}")
 
-                    if click_success:
-                        st.session_state.automation_status = f"✅ Auto-clicked successfully at {time.strftime('%H:%M:%S')}"
-                        st.session_state.open_count += 1
-                        st.session_state.last_opened = f"Auto-click #{st.session_state.open_count}"
+                # Sub-mode 1: Element selected - Navigate + Click
+                if st.session_state.selected_element:
+                    with st.spinner(f"🤖 Automating click on: {st.session_state.selected_element['text'][:40]}..."):
+                        # Navigate to page and click element (with wait if enabled)
+                        click_success, click_message = click_element_when_ready(
+                            user_url,
+                            st.session_state.selected_element['selector'],
+                            wait_enabled=True,
+                            timeout=wait_timeout
+                        )
 
-                        # Capture screenshot after successful click
-                        ss_success, screenshot = capture_screenshot(user_url)
-                        if ss_success:
-                            st.session_state.last_screenshot = screenshot
+                        if click_success:
+                            st.session_state.automation_status = f"✅ Auto-clicked successfully at {time.strftime('%H:%M:%S')}"
+                            st.session_state.open_count += 1
+                            st.session_state.last_opened = f"Auto-click #{st.session_state.open_count}"
 
-                        st.toast(f"🤖 {click_message}", icon="✅")
-                        st.success(f"✅ {click_message}")
+                            # Capture screenshot after successful click
+                            ss_success, screenshot = capture_screenshot(user_url)
+                            if ss_success:
+                                st.session_state.last_screenshot = screenshot
 
-                        # Show screenshot if captured
-                        if ss_success:
-                            st.image(screenshot, caption=f"Auto-clicked at {time.strftime('%H:%M:%S')}", use_container_width=True)
-                    else:
-                        st.session_state.automation_status = f"❌ Click failed: {click_message}"
-                        st.error(f"❌ {click_message}")
-                        st.warning("💡 Element may not be available yet. Continuing to monitor...")
+                            st.toast(f"🤖 {click_message}", icon="✅")
+                            st.success(f"✅ {click_message}")
 
-            # FALLBACK MODE: Simple URL opening for non-automation cases
+                            # Show screenshot if captured
+                            if ss_success:
+                                st.image(screenshot, caption=f"Auto-clicked at {time.strftime('%H:%M:%S')}", use_container_width=True)
+                        else:
+                            st.session_state.automation_status = f"❌ Click failed: {click_message}"
+                            st.error(f"❌ {click_message}")
+                            st.warning("💡 Element may not be available yet. Continuing to monitor...")
+
+                # Sub-mode 2: No element selected - Navigate only (NEW!)
+                else:
+                    with st.spinner(f"🌐 Navigating to page..."):
+                        # Navigate to page without clicking
+                        nav_success, nav_message = navigate_with_persistent_browser(user_url)
+
+                        if nav_success:
+                            st.session_state.automation_status = f"✅ Navigated successfully at {time.strftime('%H:%M:%S')}"
+                            st.session_state.open_count += 1
+                            st.session_state.last_opened = f"Auto-navigate #{st.session_state.open_count}"
+
+                            # Capture screenshot after successful navigation
+                            ss_success, screenshot = capture_screenshot(user_url)
+                            if ss_success:
+                                st.session_state.last_screenshot = screenshot
+
+                            st.toast(f"🌐 {nav_message}", icon="✅")
+                            st.success(f"✅ {nav_message}")
+
+                            # Show screenshot if captured
+                            if ss_success:
+                                st.image(screenshot, caption=f"Auto-navigated at {time.strftime('%H:%M:%S')}", use_container_width=True)
+                        else:
+                            st.session_state.automation_status = f"❌ Navigation failed: {nav_message}"
+                            st.error(f"❌ {nav_message}")
+                            st.warning("💡 Page may not be available. Continuing to monitor...")
+
+            # FALLBACK MODE: Simple URL opening when Playwright not available
             else:
+                print(f"[DEBUG] Auto-refresh: Using FALLBACK mode (selected_element={st.session_state.selected_element is not None}, playwright={st.session_state.playwright_available})")
+                print(f"[DEBUG] Auto-refresh: This will open a NEW TAB in system browser (not using persistent browser)")
                 if is_streamlit_cloud():
                     # Streamlit Cloud: Use JavaScript anchor click
                     auto_click_html = f"""
