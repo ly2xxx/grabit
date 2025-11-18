@@ -1,0 +1,35 @@
+# Dependabot configuration for automatic dependency updates
+# Documentation: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Monitor main Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ly2xxx"  # Update this to your GitHub username
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+
+  # Monitor local development Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/local"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "ly2xxx"  # Update this to your GitHub username
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "development"
