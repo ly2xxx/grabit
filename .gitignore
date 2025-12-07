@@ -131,5 +131,5 @@ dmypy.json
 
 # Project specific
 screenshots/
-*.html
+# *.html
 *.pdf

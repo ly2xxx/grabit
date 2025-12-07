@@ -10,7 +10,17 @@ def is_streamlit_cloud():
     """Detect if running on Streamlit Cloud vs local development"""
     # Streamlit Cloud runs on Linux with empty processor string
     # Also check for 'appuser' which is the default Streamlit Cloud user
+    # Also check for 'appuser' which is the default Streamlit Cloud user
     return platform.processor() == '' or os.getenv('USER') == 'appuser'
+
+# Import local browser manager (if available)
+try:
+    from browser_manager import get_manager
+    HAS_BROWSER_MANAGER = True
+except ImportError:
+    HAS_BROWSER_MANAGER = False
+    print("Browser manager not found. Advanced mode disabled.")
+
 
 st.set_page_config(page_title="BRS Golf Quick Access", layout="wide", page_icon="⛳")
 st.title("⛳ BRS Golf Quick Access")
@@ -25,6 +35,32 @@ st.markdown("""
 This app provides quick access to BRS Golf pages in your default browser.
 No iframe restrictions - just pure browser functionality!
 """)
+
+st.markdown("---")
+
+# ============================================================================
+# Advanced Mode Toggle
+# ============================================================================
+use_advanced_mode = st.toggle("🚀 Advanced Mode (Auto-Clicker Bot)", value=False, help="Use a real browser controlled by this app to auto-click items.")
+
+if use_advanced_mode and HAS_BROWSER_MANAGER:
+    import asyncio
+    
+    manager = get_manager()
+    
+    st.info("🤖 **Advanced Mode Active**: This controls a real browser window.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🚀 Launch/Connect Browser"):
+            with st.spinner("Launching browser..."):
+                asyncio.run(manager.start_browser(headless=False))
+                st.success("Browser launched!")
+    
+    with col2:
+        if st.button("❌ Close Browser"):
+            asyncio.run(manager.close())
+            st.warning("Browser closed.")
 
 st.markdown("---")
 
@@ -118,6 +154,63 @@ with col2:
 # Quick preset URL generator (basic example - adjust dates as needed)
 if url_preset != "Custom":
     st.info(f"💡 Selected preset: **{url_preset}** - Modify URL above to match your desired date")
+
+if use_advanced_mode and HAS_BROWSER_MANAGER:
+    st.markdown("### 🤖 Bot Controls")
+    
+    # Scanner
+    if st.button("🔍 Scan Page for Tee Times"):
+        with st.spinner("Scanning page..."):
+            items = asyncio.run(manager.get_clickable_items())
+            if items:
+                # Format for display: "07:00 - £20"
+                # Store in session state to persist across reruns
+                st.session_state.scanned_items = items
+                st.success(f"Found {len(items)} items!")
+            else:
+                st.warning("No obvious tee times found. Navigate to a Tee Sheet first.")
+
+    # Item Selector
+    selected_item = None
+    if 'scanned_items' in st.session_state and st.session_state.scanned_items:
+        options = {f"{item['text']} (Indices {item['index']})": item for item in st.session_state.scanned_items}
+        selection = st.selectbox("Select Target to Auto-Click", options.keys())
+        selected_item = options[selection]
+        
+    # Sniper
+    col_snip1, col_snip2 = st.columns(2)
+    with col_snip1:
+        if st.button("🎯 Refresh & Auto-Click ONCE", type="primary", disabled=not selected_item):
+            if selected_item:
+                st.write(f"Attempting to click: {selected_item['text']}")
+                success = asyncio.run(manager.refresh_and_click(selected_item['selector']))
+                if success:
+                    st.success("CTA Clicked!")
+                    st.balloons()
+                else:
+                    st.error("Failed to click.")
+    
+    with col_snip2:
+         # Auto-Sniper Loop
+         sniper_active = st.checkbox("🔥 Enable Auto-Sniper Loop", value=False)
+         if sniper_active and selected_item:
+             interval = st.number_input("Loop Interval (s)", 1, 60, 5)
+             st.warning(f"Looping every {interval}s... Uncheck to stop.")
+             
+             status_placeholder = st.empty()
+             
+             # Run one iteration then sleep and rerun
+             status_placeholder.write("🔄 Refreshing...")
+             success = asyncio.run(manager.refresh_and_click(selected_item['selector']))
+             
+             if success:
+                 st.success("TARGET SNIPED! Stopping loop.")
+             else:
+                 status_placeholder.write(f"⏳ Waiting {interval}s...")
+                 time.sleep(interval)
+                 st.rerun()
+
+    st.markdown("---")
 
 # Action buttons
 st.markdown("### Actions")
