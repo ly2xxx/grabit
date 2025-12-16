@@ -100,14 +100,17 @@ async def _scan_clickable_elements_async(url, storage_state=None):
         # Reuse existing browser page
         page = st.session_state.browser_page
         temp_playwright = None
+        
         temp_browser = None
         temp_context = None
         print(f"[DEBUG] Using persistent browser session for scanning: {url}")
     else:
         # Create temporary browser for this operation
+        st.toast("⚠️ Starting NEW browser (Login session not detected!)", icon="⚠️")
         print(f"[DEBUG] Creating temporary browser for scanning: {url}")
         temp_playwright = await async_playwright().start()
-        temp_browser = await temp_playwright.chromium.launch(headless=True)
+        # User requested visible mode for debugging
+        temp_browser = await temp_playwright.chromium.launch(headless=False)
 
         if storage_state:
             temp_context = await temp_browser.new_context(storage_state=storage_state)
@@ -117,47 +120,64 @@ async def _scan_clickable_elements_async(url, storage_state=None):
         page = await temp_context.new_page()
 
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        # domcontentloaded is much faster than networkidle for simple scanning
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        # Find all clickable elements
-        elements = await page.query_selector_all('button, a, input[type="submit"], input[type="button"], [role="button"]')
-
+        # Find all clickable elements using evaluate for performance (batch processing)
+        # This prevents the "hang" when there are hundreds of elements by advancing the loop to the browser side
+        js_script = """
+        () => {
+            const elements = document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"]');
+            return Array.from(elements).map((elem, index) => {
+                const style = window.getComputedStyle(elem);
+                const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && elem.offsetWidth > 0 && elem.offsetHeight > 0;
+                
+                const text = (elem.innerText || elem.value || '').trim().substring(0, 80);
+                const tagName = elem.tagName;
+                const isDisabled = elem.disabled || elem.getAttribute('aria-disabled') === 'true';
+                const id = elem.id || '';
+                const className = elem.className || '';
+                
+                return {
+                    index: index, 
+                    isVisible: isVisible,
+                    text: text || `Element ${index + 1}`,
+                    tag_name: tagName,
+                    enabled: !isDisabled,
+                    id: id,
+                    class: className
+                };
+            });
+        }
+        """
+        
+        all_items = await page.evaluate(js_script)
+        
         result = []
-        for i, elem in enumerate(elements):
-            # Check if element is visible
-            is_visible = await elem.is_visible()
-            if not is_visible:
+        base_query = 'button, a, input[type="submit"], input[type="button"], [role="button"]'
+        
+        for item in all_items:
+            if not item['isVisible']:
                 continue
-
-            # Get element properties
-            text_content = await elem.text_content()
-            value = await elem.get_attribute('value')
-            elem_id = await elem.get_attribute('id')
-            elem_class = await elem.get_attribute('class')
-            tag_name = await elem.evaluate('el => el.tagName')
-            is_disabled = await elem.is_disabled()
-
-            # Get text
-            text = (text_content or value or '').strip()[:80] or f"Element {i+1}"
-
-            # Generate selector (prefer ID, then class, then nth-of-type)
-            if elem_id:
-                selector = f"#{elem_id}"
-            elif elem_class and elem_class.strip():
-                first_class = elem_class.strip().split()[0]
-                selector = f".{first_class}"
+                
+            # Construct a robust selector for Playwright
+            # If ID is present, use it (fastest/safest)
+            if item['id']:
+                selector = f"#{item['id']}"
             else:
-                selector = f"{tag_name.lower()}:nth-of-type({i+1})"
-
+                # Use the nth-match locator syntax which is reliable for lists
+                # Note: creating a locator like this for storage string:
+                selector = f"css={base_query} >> nth={item['index']}"
+            
             result.append({
-                'index': i,
-                'text': text,
+                'index': item['index'],
+                'text': item['text'],
                 'selector': selector,
-                'enabled': not is_disabled,
+                'enabled': item['enabled'],
                 'visible': True,
-                'type': tag_name,
-                'id': elem_id or '',
-                'class': elem_class or ''
+                'type': item['tag_name'],
+                'id': item['id'],
+                'class': item['class']
             })
 
         return True, result
@@ -196,7 +216,7 @@ async def _click_element_when_ready_async(url, selector, wait_enabled=True, time
         # Create temporary browser for this operation
         print(f"[DEBUG] Creating temporary browser for clicking: {url}")
         temp_playwright = await async_playwright().start()
-        temp_browser = await temp_playwright.chromium.launch(headless=True)
+        temp_browser = await temp_playwright.chromium.launch(headless=False)
 
         if storage_state:
             temp_context = await temp_browser.new_context(storage_state=storage_state)
@@ -207,7 +227,7 @@ async def _click_element_when_ready_async(url, selector, wait_enabled=True, time
 
     try:
         # Navigate to the URL
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         if wait_enabled:
             # Wait for element to be enabled (poll)
@@ -317,7 +337,7 @@ async def _capture_screenshot_async(url=None, storage_state=None):
         # Create temporary browser for this operation
         print(f"[DEBUG] Creating temporary browser for screenshot: {url}")
         temp_playwright = await async_playwright().start()
-        temp_browser = await temp_playwright.chromium.launch(headless=True)
+        temp_browser = await temp_playwright.chromium.launch(headless=False)
 
         if storage_state:
             temp_context = await temp_browser.new_context(storage_state=storage_state)
@@ -328,7 +348,7 @@ async def _capture_screenshot_async(url=None, storage_state=None):
 
     try:
         if url:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         screenshot_bytes = await page.screenshot(full_page=True)
         return True, screenshot_bytes
