@@ -596,7 +596,7 @@ else:
     with col1:
         user_url = st.text_input(
             "Target Page URL",
-            value="https://members.brsgolf.com/gsaayr/tee-sheet/1/2025/11/11",
+            value="https://members.brsgolf.com/gsaayr/tee-sheet/1/2025/12/23",
             help="Enter the full URL of the target page you want to scan",
             key="target_url_input"
         )
