@@ -1,4 +1,4 @@
-streamlit==1.50.0
+streamlit==1.53.0
 playwright==1.55.0
 # pytest-playwright==0.7.1
 # asyncio-contextmanager==1.0.0
