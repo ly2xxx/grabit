@@ -1,0 +1,60 @@
+# Read-only: list tee-time slots on a BRS Golf tee sheet for a given date.
+#
+# Requires an authenticated session mounted into the container
+# (STORAGE_STATE=/session/state.json — see local/save_brs_session.py).
+#
+# Self-diagnosing: the result always includes page_url. If it ends in /login,
+# the session has expired (re-run the session saver on the host) — this is the
+# exact failure mode the old Streamlit prototype got stuck on. If page_url is
+# the tee sheet but available_slots is empty, either nothing is bookable or
+# row_selector needs tuning for your club's markup — re-call with
+# row_selector: "tr" to dump every row and see what the sheet actually renders.
+name: brs_tee_sheet
+description: >
+  List available (bookable) tee-time slots on a BRS Golf tee sheet.
+  Returns JSON with page_url and available_slots (one text blob per bookable
+  row, typically "time / players / Book"). If page_url ends in /login the
+  mounted session has expired and must be refreshed on the host. If
+  available_slots is empty on a valid tee-sheet URL, re-call with
+  row_selector "tr" to inspect all rows and adjust the selector.
+inputs:
+  club:
+    type: string
+    required: true
+    description: Club slug from the members URL, e.g. "gsaayr" in members.brsgolf.com/gsaayr/...
+  course:
+    type: integer
+    default: 1
+    description: Course id in the tee-sheet URL (usually 1).
+  date:
+    type: string
+    required: true
+    description: Tee-sheet date as YYYY/MM/DD, e.g. "2026/07/14".
+  row_selector:
+    type: string
+    default: 'tr:has(button:has-text("Book")), tr:has(a:has-text("Book"))'
+    description: >
+      Playwright selector for a bookable tee-sheet row. Default matches any
+      table row containing a Book button/link. Pass "tr" to list every row
+      when tuning for a new club.
+steps:
+  - action: goto
+    url: "https://members.brsgolf.com/{{ club }}/tee-sheet/{{ course }}/{{ date }}"
+    wait_until: domcontentloaded
+  # The tee sheet is a JS app — give it a beat to boot, then wait for rows.
+  - action: wait
+    ms: 1500
+  # optional: on timeout we still fall through to the diagnostic extracts
+  # below instead of failing with a bare TimeoutError.
+  - action: wait_for
+    selector: "{{ row_selector }}"
+    timeout: 15000
+    optional: true
+  - action: extract
+    mode: url
+    as: page_url
+  - action: extract
+    mode: list
+    selector: "{{ row_selector }}"
+    as: available_slots
+# No `returns` → the flow emits everything extracted: { page_url, available_slots }.

@@ -1,0 +1,97 @@
+# GUARDED booking flow: books a tee-time slot on a BRS Golf tee sheet.
+#
+# Two assert guards run before any page interaction (same posture as
+# betfair_place_bet):
+#   1. ALLOW_BOOKING=true must be set on the container (env secret) — if the
+#      var is unset the flow fails with a "missing secret" error, which is the
+#      deny-by-default behaviour we want;
+#   2. confirm=true must be passed explicitly on each call.
+#
+# First run at a new club WILL likely need confirm_selector tuned: BRS booking
+# forms differ per club (player count, buggy, member picker). Call
+# brs_tee_sheet first, pick a time from its output, then run this with
+# confirm=false... which the guard refuses — so tune on a throwaway slot with
+# ALLOW_BOOKING set, or walk the form manually once and note the button text.
+name: brs_book_slot
+description: >
+  Book a tee-time slot — GUARDED. Refuses unless the container has
+  ALLOW_BOOKING=true AND confirm=true is passed. Clicks the Book control on
+  the tee-sheet row whose text contains `time` (use a time exactly as shown
+  by brs_tee_sheet, e.g. "07:30"), then clicks the booking form's confirm
+  button (confirm_selector — override if your club's form uses different
+  text). Returns booking_page_url / final_url / final_title as a receipt;
+  verify the booking in the BRS member portal after the first live use.
+inputs:
+  club:
+    type: string
+    required: true
+    description: Club slug from the members URL, e.g. "gsaayr".
+  course:
+    type: integer
+    default: 1
+    description: Course id in the tee-sheet URL (usually 1).
+  date:
+    type: string
+    required: true
+    description: Tee-sheet date as YYYY/MM/DD, e.g. "2026/07/14".
+  time:
+    type: string
+    required: true
+    description: The slot time exactly as it appears in the row text from brs_tee_sheet, e.g. "07:30".
+  confirm:
+    type: boolean
+    default: false
+    description: Must be true to actually book — safety interlock, no dry-run mode.
+  confirm_selector:
+    type: string
+    default: 'button:has-text("Confirm")'
+    description: >
+      Selector for the booking form's final confirm/submit control. Common
+      variants: 'button:has-text("Confirm Booking")', 'button:has-text("Book Now")',
+      'button[type="submit"]'.
+steps:
+  # -- Guards first: nothing touches the page until both pass. --------------
+  - action: assert
+    that: "{{ secret.ALLOW_BOOKING }}"
+    equals: "true"
+    message: "Booking is disabled. Set ALLOW_BOOKING=true on the container to enable real bookings."
+  - action: assert
+    that: "{{ confirm }}"
+    equals: "true"
+    message: "confirm=false — re-call with confirm=true to actually book this slot."
+  # -- Open the sheet and click Book on the chosen row. ---------------------
+  - action: goto
+    url: "https://members.brsgolf.com/{{ club }}/tee-sheet/{{ course }}/{{ date }}"
+    wait_until: domcontentloaded
+  - action: wait
+    ms: 1500
+  # Required (not optional): if the slot's Book control is gone, fail loud —
+  # someone else may have grabbed it. Re-run brs_tee_sheet to see what's left.
+  - action: wait_for
+    selector: 'tr:has-text("{{ time }}") button:has-text("Book"), tr:has-text("{{ time }}") a:has-text("Book")'
+    timeout: 15000
+  - action: click
+    selector: 'tr:has-text("{{ time }}") button:has-text("Book"), tr:has-text("{{ time }}") a:has-text("Book")'
+    timeout: 10000
+  - action: wait
+    ms: 2000
+  # Where did Book take us? Kept in the result as a debugging breadcrumb.
+  - action: extract
+    mode: url
+    as: booking_page_url
+  # -- Booking form: confirm. ------------------------------------------------
+  - action: wait_for
+    selector: "{{ confirm_selector }}"
+    timeout: 15000
+  - action: click
+    selector: "{{ confirm_selector }}"
+    timeout: 10000
+  - action: wait
+    ms: 3000
+  - action: extract
+    mode: url
+    as: final_url
+  - action: extract
+    mode: title
+    as: final_title
+# No `returns` → emits { booking_page_url, final_url, final_title } as the receipt.
